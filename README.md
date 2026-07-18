@@ -1,6 +1,12 @@
 # FB2 to EPUB Converter
 
-Небольшая CLI-программа на Python для конвертации книг `.fb2` в `.epub`.
+Небольшая CLI-программа на Python для конвертации книг `.fb2`, `.djvu` и `.djv` в `.epub`.
+
+Для FB2 зависимости не нужны. Для DjVu нужен DjVuLibre:
+
+```bash
+brew install djvulibre
+```
 
 ## Использование
 
@@ -10,13 +16,19 @@ python3 fb2_to_epub.py book.fb2
 
 По умолчанию рядом с исходным файлом появится `book.epub`.
 
+DjVu-файл конвертируется так же:
+
+```bash
+python3 fb2_to_epub.py book.djvu
+```
+
 Можно указать путь явно:
 
 ```bash
 python3 fb2_to_epub.py book.fb2 -o output/book.epub
 ```
 
-Можно конвертировать сразу все `.fb2` файлы в папке, включая подпапки:
+Можно конвертировать сразу все поддерживаемые файлы в папке, включая подпапки:
 
 ```bash
 python3 fb2_to_epub.py files
@@ -37,5 +49,6 @@ python3 fb2_to_epub.py files -o epub
 - абзацы, заголовки, подзаголовки, цитаты, стихи;
 - inline-разметка: emphasis, strong, code, sub, sup, ссылки;
 - картинки из `binary`, включая coverpage.
+- текстовый слой DjVu через `djvutxt`.
 
-Зависимости не нужны: используется только стандартная библиотека Python.
+Важно: DjVu без встроенного текстового слоя потребует OCR. Эта программа OCR не выполняет.

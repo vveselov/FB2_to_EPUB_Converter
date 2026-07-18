@@ -3,3 +3,7 @@ __pycache__/
 *.py[cod]
 *.epub
 files/
+*.fb2
+*.djvu
+*.djv
+

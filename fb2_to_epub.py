@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Convert FictionBook 2.0/2.1 (.fb2) files to EPUB 2.
+"""Convert FictionBook 2.0/2.1 (.fb2) and DjVu (.djvu/.djv) files to EPUB 2.
 
-The converter intentionally uses only Python's standard library. It supports
-common FB2 structures: metadata, sections, titles, poems/stanzas, subtitles,
-notes, inline emphasis/strong/code, links, images from <binary>, and cover art.
+The FB2 converter intentionally uses only Python's standard library. DjVu text
+extraction requires the external DjVuLibre command-line tool `djvutxt`.
 """
 
 from __future__ import annotations
@@ -13,6 +12,8 @@ import base64
 import html
 import mimetypes
 import re
+import shutil
+import subprocess
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from xml.etree import ElementTree as ET
 FB2_NS = "http://www.gribuser.ru/xml/fictionbook/2.0"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 NS = {"fb": FB2_NS, "l": XLINK_NS}
+SUPPORTED_EXTENSIONS = {".fb2", ".djvu", ".djv"}
 
 
 class ConversionError(Exception):
@@ -290,6 +292,59 @@ def parse_fb2(path: Path) -> Book:
     return Book(title, authors or ["Unknown Author"], language, identifier, annotation, chapters, images, cover_href)
 
 
+def decode_command_output(data: bytes) -> str:
+    for encoding in ("utf-8", "cp1251", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def text_to_html(text: str) -> str:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if not paragraphs:
+        return "<p></p>"
+    return "\n".join(f"<p>{html.escape(paragraph).replace(chr(10), '<br />')}</p>" for paragraph in paragraphs)
+
+
+def parse_djvu(path: Path) -> Book:
+    djvutxt = shutil.which("djvutxt")
+    if not djvutxt:
+        raise ConversionError(
+            "DjVu conversion requires DjVuLibre. Install it first, for example: brew install djvulibre"
+        )
+
+    try:
+        result = subprocess.run([djvutxt, str(path)], check=False, capture_output=True)
+    except OSError as exc:
+        raise ConversionError(f"Cannot run djvutxt: {exc}") from exc
+
+    if result.returncode != 0:
+        message = decode_command_output(result.stderr).strip() or "djvutxt failed"
+        raise ConversionError(message)
+
+    text = decode_command_output(result.stdout).strip()
+    if not text:
+        raise ConversionError("DjVu file does not contain an extractable text layer.")
+
+    pages = [page.strip() for page in text.split("\f") if page.strip()]
+    chapters: List[Chapter] = []
+    if pages:
+        for index, page in enumerate(pages, start=1):
+            chapters.append(Chapter(f"Page {index}", f"text/page-{index:03d}.xhtml", text_to_html(page)))
+    else:
+        chapters.append(Chapter(path.stem, "text/chapter-001.xhtml", text_to_html(text)))
+
+    return Book(
+        title=path.stem,
+        authors=["Unknown Author"],
+        language="und",
+        identifier=f"urn:uuid:{uuid.uuid4()}",
+        chapters=chapters,
+    )
+
+
 def xhtml_page(title: str, body: str) -> str:
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
@@ -437,18 +492,23 @@ def write_epub(book: Book, output_path: Path) -> None:
 
 
 def convert_file(input_path: Path, output_path: Optional[Path] = None) -> Path:
-    if input_path.suffix.lower() != ".fb2":
-        raise ConversionError(f"Input file should have .fb2 extension: {input_path}")
     if not input_path.exists():
         raise ConversionError(f"Input file not found: {input_path}")
+    suffix = input_path.suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        raise ConversionError(f"Input file should have one of these extensions ({supported}): {input_path}")
     output = output_path or input_path.with_suffix(".epub")
-    book = parse_fb2(input_path)
+    if suffix == ".fb2":
+        book = parse_fb2(input_path)
+    else:
+        book = parse_djvu(input_path)
     write_epub(book, output)
     return output
 
 
-def find_fb2_files(directory: Path) -> List[Path]:
-    return sorted(path for path in directory.rglob("*") if path.is_file() and path.suffix.lower() == ".fb2")
+def find_book_files(directory: Path) -> List[Path]:
+    return sorted(path for path in directory.rglob("*") if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS)
 
 
 def output_for_directory_item(input_file: Path, input_dir: Path, output_dir: Optional[Path]) -> Path:
@@ -466,9 +526,10 @@ def convert_directory(input_dir: Path, output_dir: Optional[Path] = None) -> Lis
     if output_dir is not None and output_dir.exists() and not output_dir.is_dir():
         raise ConversionError(f"Output path should be a directory for batch conversion: {output_dir}")
 
-    input_files = find_fb2_files(input_dir)
+    input_files = find_book_files(input_dir)
     if not input_files:
-        raise ConversionError(f"No .fb2 files found in directory: {input_dir}")
+        supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        raise ConversionError(f"No supported files ({supported}) found in directory: {input_dir}")
 
     created: List[Path] = []
     failures: List[str] = []
@@ -492,8 +553,8 @@ def convert_path(input_path: Path, output_path: Optional[Path] = None) -> List[P
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert FB2 books to EPUB.")
-    parser.add_argument("input", type=Path, help="Path to .fb2 file or directory with .fb2 files")
+    parser = argparse.ArgumentParser(description="Convert FB2 and DjVu books to EPUB.")
+    parser.add_argument("input", type=Path, help="Path to .fb2/.djvu/.djv file or directory with books")
     parser.add_argument(
         "-o",
         "--output",
