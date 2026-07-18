@@ -17,13 +17,17 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 from xml.etree import ElementTree as ET
 
 
 FB2_NS = "http://www.gribuser.ru/xml/fictionbook/2.0"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 NS = {"fb": FB2_NS, "l": XLINK_NS}
+
+
+class ConversionError(Exception):
+    """Raised when one FB2 file cannot be converted."""
 
 
 @dataclass
@@ -244,13 +248,13 @@ def parse_fb2(path: Path) -> Book:
     try:
         tree = ET.parse(path)
     except ET.ParseError as exc:
-        raise SystemExit(f"Cannot parse FB2 XML: {exc}") from exc
+        raise ConversionError(f"Cannot parse FB2 XML: {exc}") from exc
 
     root = tree.getroot()
     description = root.find("fb:description", NS)
     title_info = root.find("fb:description/fb:title-info", NS)
     if description is None or title_info is None:
-        raise SystemExit("FB2 file does not contain description/title-info metadata.")
+        raise ConversionError("FB2 file does not contain description/title-info metadata.")
 
     title = find_text(title_info, "fb:book-title", path.stem)
     authors = [parse_author(author) for author in title_info.findall("fb:author", NS)]
@@ -434,26 +438,82 @@ def write_epub(book: Book, output_path: Path) -> None:
 
 def convert_file(input_path: Path, output_path: Optional[Path] = None) -> Path:
     if input_path.suffix.lower() != ".fb2":
-        raise SystemExit(f"Input file should have .fb2 extension: {input_path}")
+        raise ConversionError(f"Input file should have .fb2 extension: {input_path}")
     if not input_path.exists():
-        raise SystemExit(f"Input file not found: {input_path}")
+        raise ConversionError(f"Input file not found: {input_path}")
     output = output_path or input_path.with_suffix(".epub")
     book = parse_fb2(input_path)
     write_epub(book, output)
     return output
 
 
+def find_fb2_files(directory: Path) -> List[Path]:
+    return sorted(path for path in directory.rglob("*") if path.is_file() and path.suffix.lower() == ".fb2")
+
+
+def output_for_directory_item(input_file: Path, input_dir: Path, output_dir: Optional[Path]) -> Path:
+    if output_dir is None:
+        return input_file.with_suffix(".epub")
+    relative = input_file.relative_to(input_dir).with_suffix(".epub")
+    return output_dir / relative
+
+
+def convert_directory(input_dir: Path, output_dir: Optional[Path] = None) -> List[Path]:
+    if not input_dir.exists():
+        raise ConversionError(f"Input directory not found: {input_dir}")
+    if not input_dir.is_dir():
+        raise ConversionError(f"Input path is not a directory: {input_dir}")
+    if output_dir is not None and output_dir.exists() and not output_dir.is_dir():
+        raise ConversionError(f"Output path should be a directory for batch conversion: {output_dir}")
+
+    input_files = find_fb2_files(input_dir)
+    if not input_files:
+        raise ConversionError(f"No .fb2 files found in directory: {input_dir}")
+
+    created: List[Path] = []
+    failures: List[str] = []
+    for input_file in input_files:
+        output_file = output_for_directory_item(input_file, input_dir, output_dir)
+        try:
+            created.append(convert_file(input_file, output_file))
+        except ConversionError as exc:
+            failures.append(f"{input_file}: {exc}")
+
+    if failures:
+        message = "Some files could not be converted:\n" + "\n".join(f"  - {failure}" for failure in failures)
+        raise ConversionError(message)
+    return created
+
+
+def convert_path(input_path: Path, output_path: Optional[Path] = None) -> List[Path]:
+    if input_path.is_dir():
+        return convert_directory(input_path, output_path)
+    return [convert_file(input_path, output_path)]
+
+
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert FB2 books to EPUB.")
-    parser.add_argument("input", type=Path, help="Path to .fb2 file")
-    parser.add_argument("-o", "--output", type=Path, help="Path to output .epub file")
+    parser.add_argument("input", type=Path, help="Path to .fb2 file or directory with .fb2 files")
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Path to output .epub file, or output directory when input is a directory",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(argv)
-    output = convert_file(args.input, args.output)
-    print(f"Created {output}")
+    try:
+        outputs = convert_path(args.input, args.output)
+    except ConversionError as exc:
+        print(f"Error: {exc}")
+        return 1
+    for output in outputs:
+        print(f"Created {output}")
+    if len(outputs) > 1:
+        print(f"Converted {len(outputs)} files.")
     return 0
 
 
